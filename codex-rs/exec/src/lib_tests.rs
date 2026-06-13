@@ -297,7 +297,7 @@ fn runtime_warnings_are_filtered_to_the_primary_thread() {
 }
 
 #[tokio::test]
-async fn resume_lookup_model_providers_filters_only_last_lookup() {
+async fn resume_lookup_model_providers_keeps_history_provider_agnostic() {
     let codex_home = tempdir().expect("create temp codex home");
     let cwd = tempdir().expect("create temp cwd");
     let mut config = ConfigBuilder::default()
@@ -323,10 +323,7 @@ async fn resume_lookup_model_providers_filters_only_last_lookup() {
         prompt: None,
     };
 
-    assert_eq!(
-        resume_lookup_model_providers(&config, &last_args),
-        Some(vec!["test-provider".to_string()])
-    );
+    assert_eq!(resume_lookup_model_providers(&config, &last_args), None);
     assert_eq!(resume_lookup_model_providers(&config, &named_args), None);
 }
 

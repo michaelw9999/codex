@@ -3551,7 +3551,7 @@ impl ThreadRequestProcessor {
         filters: ThreadListFilters,
     ) -> Result<(Vec<StoredThread>, Option<String>), JSONRPCErrorError> {
         let ThreadListFilters {
-            model_providers,
+            model_providers: _model_providers,
             source_kinds,
             archived,
             cwd_filters,
@@ -3564,16 +3564,10 @@ impl ThreadRequestProcessor {
         let mut items = Vec::with_capacity(requested_page_size);
         let mut next_cursor: Option<String> = None;
 
-        let model_provider_filter = match model_providers {
-            Some(providers) => {
-                if providers.is_empty() {
-                    None
-                } else {
-                    Some(providers)
-                }
-            }
-            None => Some(vec![self.config.model_provider_id.clone()]),
-        };
+        // Keep local history shared when switching between OpenAI and custom
+        // local providers. The UI may still send a provider list from its active
+        // config, but thread history should remain provider-agnostic.
+        let model_provider_filter: Option<Vec<String>> = None;
         let (allowed_sources_vec, source_kind_filter) = compute_source_filters(source_kinds);
         let allowed_sources = allowed_sources_vec.as_slice();
         let store_sort_direction = match sort_direction {

@@ -1540,14 +1540,10 @@ async fn resolve_resume_thread_id(
 }
 
 fn resume_lookup_model_providers(
-    config: &Config,
-    args: &crate::cli::ResumeArgs,
+    _config: &Config,
+    _args: &crate::cli::ResumeArgs,
 ) -> Option<Vec<String>> {
-    if args.last {
-        Some(vec![config.model_provider_id.clone()])
-    } else {
-        None
-    }
+    None
 }
 
 fn canceled_mcp_server_elicitation_response() -> Result<Value, String> {
