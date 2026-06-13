@@ -5,6 +5,8 @@ use codex_api::create_text_param_for_request;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
+use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use pretty_assertions::assert_eq;
 
 use super::*;
@@ -90,6 +92,39 @@ fn responses_lite_request_copies_strip_image_details() {
         prompt.get_formatted_input_for_request(/*use_responses_lite*/ false),
         original
     );
+}
+
+#[test]
+fn request_formatting_strips_reasoning_content() {
+    let prompt = Prompt {
+        input: vec![ResponseItem::Reasoning {
+            id: "rs_123".to_string(),
+            summary: vec![ReasoningItemReasoningSummary::SummaryText {
+                text: "short summary".to_string(),
+            }],
+            content: Some(vec![ReasoningItemContent::ReasoningText {
+                text: "raw reasoning text".to_string(),
+            }]),
+            encrypted_content: Some("encrypted".to_string()),
+        }],
+        ..Default::default()
+    };
+    let original = prompt.input.clone();
+
+    let formatted = prompt.get_formatted_input_for_request(/*use_responses_lite*/ false);
+
+    assert_eq!(
+        formatted,
+        vec![ResponseItem::Reasoning {
+            id: "rs_123".to_string(),
+            summary: vec![ReasoningItemReasoningSummary::SummaryText {
+                text: "short summary".to_string(),
+            }],
+            content: None,
+            encrypted_content: Some("encrypted".to_string()),
+        }]
+    );
+    assert_eq!(prompt.input, original);
 }
 
 #[test]

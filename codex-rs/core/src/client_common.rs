@@ -59,10 +59,19 @@ impl Prompt {
         use_responses_lite: bool,
     ) -> Vec<ResponseItem> {
         let mut input = self.input.clone();
+        strip_reasoning_content(&mut input);
         if use_responses_lite {
             strip_image_details(&mut input);
         }
         input
+    }
+}
+
+fn strip_reasoning_content(items: &mut [ResponseItem]) {
+    for item in items {
+        if let ResponseItem::Reasoning { content, .. } = item {
+            *content = None;
+        }
     }
 }
 

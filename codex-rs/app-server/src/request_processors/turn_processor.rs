@@ -307,6 +307,8 @@ impl TurnRequestProcessor {
                     && self.is_known_openai_model(model).await
                 {
                     Some(OPENAI_PROVIDER_ID.to_string())
+                } else if model.is_some() {
+                    Some(self.config.model_provider_id.clone())
                 } else {
                     None
                 }
