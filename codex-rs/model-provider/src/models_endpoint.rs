@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codex_api::ModelsClient;
+use codex_api::ProviderModel;
 use codex_api::RequestTelemetry;
 use codex_api::ReqwestTransport;
 use codex_api::TransportError;
@@ -93,6 +94,33 @@ impl OpenAiModelsEndpoint {
         .map_err(map_api_error)
     }
 
+    async fn list_provider_models(&self, client_version: &str) -> CoreResult<Vec<ProviderModel>> {
+        let _timer =
+            codex_otel::start_global_timer("codex.provider_models.fetch_update.duration_ms", &[]);
+        let auth = self.auth().await;
+        let auth_mode = auth.as_ref().map(CodexAuth::auth_mode);
+        let api_provider = self.provider_info.to_api_provider(auth_mode)?;
+        let api_auth = resolve_provider_auth(auth.as_ref(), &self.provider_info)?;
+        let transport = ReqwestTransport::new(build_reqwest_client());
+        let auth_telemetry = auth_header_telemetry(api_auth.as_ref());
+        let request_telemetry: Arc<dyn RequestTelemetry> = Arc::new(ModelsRequestTelemetry {
+            auth_mode: auth_mode.map(|mode| TelemetryAuthMode::from(mode).to_string()),
+            auth_header_attached: auth_telemetry.attached,
+            auth_header_name: auth_telemetry.name,
+            auth_env: self.auth_env(),
+        });
+        let client = ModelsClient::new(transport, api_provider, api_auth)
+            .with_telemetry(Some(request_telemetry));
+
+        timeout(
+            MODELS_REFRESH_TIMEOUT,
+            client.list_provider_models(client_version, HeaderMap::new()),
+        )
+        .await
+        .map_err(|_| CodexErr::Timeout)?
+        .map_err(map_api_error)
+    }
+
     fn auth_env(&self) -> AuthEnvTelemetry {
         let codex_api_key_env_enabled = self
             .auth_manager
@@ -100,6 +128,16 @@ impl OpenAiModelsEndpoint {
             .is_some_and(|auth_manager| auth_manager.codex_api_key_env_enabled());
         collect_auth_env_telemetry(&self.provider_info, codex_api_key_env_enabled)
     }
+}
+
+pub async fn list_provider_models(
+    provider_info: ModelProviderInfo,
+    auth_manager: Option<Arc<AuthManager>>,
+    client_version: &str,
+) -> CoreResult<Vec<ProviderModel>> {
+    OpenAiModelsEndpoint::new(provider_info, auth_manager)
+        .list_provider_models(client_version)
+        .await
 }
 
 impl ModelsEndpointClient for OpenAiModelsEndpoint {

@@ -6471,6 +6471,54 @@ model = "gpt-4.1"
     Ok(())
 }
 
+#[test]
+fn namespaced_model_selects_provider_and_strips_model_id() -> anyhow::Result<()> {
+    let mut model_providers = built_in_model_providers(/*openai_base_url*/ None);
+    model_providers.insert(
+        "llamacpp".to_string(),
+        ModelProviderInfo {
+            name: "Local llama.cpp".to_string(),
+            base_url: Some("http://127.0.0.1:8080/v1".to_string()),
+            requires_openai_auth: false,
+            supports_websockets: false,
+            ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+        },
+    );
+
+    let (model, provider) = resolve_model_provider_and_model(
+        Some("llamacpp/Qwen3.6.gguf".to_string()),
+        Some(OPENAI_PROVIDER_ID.to_string()),
+        &model_providers,
+        None,
+    )?;
+
+    assert_eq!(model.as_deref(), Some("Qwen3.6.gguf"));
+    assert_eq!(provider, "llamacpp");
+    Ok(())
+}
+
+#[test]
+fn bundled_openai_model_selects_openai_provider() -> anyhow::Result<()> {
+    let model_providers = built_in_model_providers(/*openai_base_url*/ None);
+    let openai_model = bundled_models_response()?
+        .models
+        .into_iter()
+        .next()
+        .expect("bundled model catalog should not be empty")
+        .slug;
+
+    let (model, provider) = resolve_model_provider_and_model(
+        Some(openai_model.clone()),
+        Some("llamacpp".to_string()),
+        &model_providers,
+        None,
+    )?;
+
+    assert_eq!(model.as_deref(), Some(openai_model.as_str()));
+    assert_eq!(provider, OPENAI_PROVIDER_ID);
+    Ok(())
+}
+
 struct PrecedenceTestFixture {
     cwd: TempDir,
     codex_home: TempDir,

@@ -1,5 +1,10 @@
 use super::*;
+use crate::models::ProviderCatalogModel;
 use codex_config::config_toml::ConfigToml;
+use codex_model_provider::list_provider_models;
+use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_model_provider_info::built_in_model_providers;
+use codex_models_manager::client_version_to_whole;
 use futures::StreamExt;
 
 #[derive(Clone)]
@@ -157,7 +162,7 @@ impl CatalogRequestProcessor {
         &self,
         params: ModelListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        Self::list_models(self.thread_manager.clone(), params)
+        self.list_models(params)
             .await
             .map(|response| Some(response.into()))
     }
@@ -246,7 +251,7 @@ impl CatalogRequestProcessor {
     }
 
     async fn list_models(
-        thread_manager: Arc<ThreadManager>,
+        &self,
         params: ModelListParams,
     ) -> Result<ModelListResponse, JSONRPCErrorError> {
         let ModelListParams {
@@ -254,7 +259,13 @@ impl CatalogRequestProcessor {
             cursor,
             include_hidden,
         } = params;
-        let models = supported_models(thread_manager, include_hidden.unwrap_or(false)).await;
+        let provider_models = self.discover_provider_models().await;
+        let models = supported_models(
+            self.thread_manager.clone(),
+            include_hidden.unwrap_or(false),
+            provider_models,
+        )
+        .await;
         let total = models.len();
 
         if total == 0 {
@@ -290,6 +301,50 @@ impl CatalogRequestProcessor {
             data: items,
             next_cursor,
         })
+    }
+
+    async fn discover_provider_models(&self) -> Vec<ProviderCatalogModel> {
+        let built_in_provider_ids: HashSet<String> =
+            built_in_model_providers(/*openai_base_url*/ None)
+                .into_keys()
+                .collect();
+        let mut providers = self
+            .config
+            .model_providers
+            .iter()
+            .filter(|(provider_id, provider)| {
+                provider_id.as_str() != OPENAI_PROVIDER_ID
+                    && provider.base_url.is_some()
+                    && (provider_id.as_str() == self.config.model_provider_id
+                        || !built_in_provider_ids.contains(provider_id.as_str()))
+            })
+            .collect::<Vec<_>>();
+        providers.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+        let mut discovered = Vec::new();
+        let client_version = client_version_to_whole();
+        for (provider_id, provider) in providers {
+            match list_provider_models(
+                provider.clone(),
+                Some(Arc::clone(&self.auth_manager)),
+                &client_version,
+            )
+            .await
+            {
+                Ok(models) => {
+                    discovered.extend(models.into_iter().map(|model| ProviderCatalogModel {
+                        provider_id: provider_id.clone(),
+                        provider_name: provider.name.clone(),
+                        model_id: model.id,
+                    }));
+                }
+                Err(err) => {
+                    warn!("failed to list models for provider `{provider_id}`: {err}");
+                }
+            }
+        }
+
+        discovered
     }
 
     async fn list_collaboration_modes(

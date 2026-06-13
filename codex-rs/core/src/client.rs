@@ -379,6 +379,50 @@ impl ModelClient {
         }
     }
 
+    pub fn new_session_with_provider(
+        &self,
+        provider_info: ModelProviderInfo,
+        auth_manager: Option<Arc<AuthManager>>,
+    ) -> ModelClientSession {
+        if self.state.provider.info() == &provider_info {
+            return self.new_session();
+        }
+
+        let model_provider = create_model_provider(provider_info, auth_manager);
+        let codex_api_key_env_enabled = model_provider
+            .auth_manager()
+            .as_ref()
+            .is_some_and(|manager| manager.codex_api_key_env_enabled());
+        let auth_env_telemetry =
+            collect_auth_env_telemetry(model_provider.info(), codex_api_key_env_enabled);
+        let include_attestation = model_provider.supports_attestation();
+        let client = ModelClient {
+            state: Arc::new(ModelClientState {
+                thread_id: self.state.thread_id,
+                provider: model_provider,
+                auth_env_telemetry,
+                session_source: self.state.session_source.clone(),
+                model_verbosity: self.state.model_verbosity,
+                enable_request_compression: self.state.enable_request_compression,
+                include_timing_metrics: self.state.include_timing_metrics,
+                beta_features_header: self.state.beta_features_header.clone(),
+                include_attestation,
+                attestation_provider: self.state.attestation_provider.clone(),
+                disable_websockets: AtomicBool::new(
+                    self.state.disable_websockets.load(Ordering::Relaxed),
+                ),
+                cached_websocket_session: StdMutex::new(WebsocketSession::default()),
+            }),
+            prompt_cache_key_override: self.prompt_cache_key_override.clone(),
+        };
+
+        ModelClientSession {
+            client,
+            websocket_session: WebsocketSession::default(),
+            turn_state: Arc::new(OnceLock::new()),
+        }
+    }
+
     pub(crate) fn auth_manager(&self) -> Option<Arc<AuthManager>> {
         self.state.provider.auth_manager()
     }
@@ -930,6 +974,10 @@ impl Drop for ModelClientSession {
 }
 
 impl ModelClientSession {
+    pub(crate) fn provider_info(&self) -> &ModelProviderInfo {
+        self.client.state.provider.info()
+    }
+
     fn reset_websocket_session(&mut self) {
         self.websocket_session.connection = None;
         self.websocket_session.last_request = None;

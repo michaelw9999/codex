@@ -56,6 +56,7 @@ struct ThreadSettingsBuildParams {
     sandbox_policy: Option<codex_app_server_protocol::SandboxPolicy>,
     permissions: Option<String>,
     model: Option<String>,
+    model_provider: Option<String>,
     service_tier: Option<Option<String>>,
     effort: Option<ReasoningEffort>,
     summary: Option<ReasoningSummary>,
@@ -279,6 +280,82 @@ impl TurnRequestProcessor {
         collaboration_mode
     }
 
+    async fn resolve_model_provider_override(
+        &self,
+        model: Option<String>,
+        model_provider: Option<String>,
+    ) -> Result<(Option<String>, Option<String>), JSONRPCErrorError> {
+        let (model, provider_from_model) = match model {
+            Some(model) => self.split_namespaced_model(model)?,
+            None => (None, None),
+        };
+
+        let model_provider = model_provider
+            .map(|provider| provider.trim().to_string())
+            .filter(|provider| !provider.is_empty());
+
+        let model_provider = match (model_provider, provider_from_model) {
+            (Some(explicit), Some(from_model)) if explicit != from_model => {
+                return Err(invalid_request(format!(
+                    "model provider `{explicit}` does not match namespaced model provider `{from_model}`"
+                )));
+            }
+            (Some(explicit), _) => Some(explicit),
+            (None, Some(from_model)) => Some(from_model),
+            (None, None) => {
+                if let Some(model) = model.as_deref()
+                    && self.is_known_openai_model(model).await
+                {
+                    Some(OPENAI_PROVIDER_ID.to_string())
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some(provider) = model_provider.as_deref()
+            && !self.config.model_providers.contains_key(provider)
+        {
+            return Err(invalid_request(format!(
+                "model provider `{provider}` is not configured"
+            )));
+        }
+
+        Ok((model, model_provider))
+    }
+
+    fn split_namespaced_model(
+        &self,
+        model: String,
+    ) -> Result<(Option<String>, Option<String>), JSONRPCErrorError> {
+        let Some((candidate_provider, candidate_model)) = model.split_once('/') else {
+            return Ok((Some(model), None));
+        };
+
+        if !self.config.model_providers.contains_key(candidate_provider) {
+            return Ok((Some(model), None));
+        }
+
+        if candidate_model.trim().is_empty() {
+            return Err(invalid_request(format!(
+                "model id must not be empty for provider `{candidate_provider}`"
+            )));
+        }
+
+        Ok((
+            Some(candidate_model.to_string()),
+            Some(candidate_provider.to_string()),
+        ))
+    }
+
+    async fn is_known_openai_model(&self, model: &str) -> bool {
+        self.thread_manager
+            .list_models(RefreshStrategy::Offline)
+            .await
+            .into_iter()
+            .any(|preset| preset.id == model || preset.model == model)
+    }
+
     fn review_request_from_target(
         target: ApiReviewTarget,
     ) -> Result<(ReviewRequest, String), JSONRPCErrorError> {
@@ -448,6 +525,7 @@ impl TurnRequestProcessor {
                     sandbox_policy: params.sandbox_policy,
                     permissions: params.permissions,
                     model: params.model,
+                    model_provider: params.model_provider,
                     service_tier: params.service_tier,
                     effort: params.effort,
                     summary: params.summary,
@@ -546,6 +624,7 @@ impl TurnRequestProcessor {
             sandbox_policy,
             permissions,
             model,
+            model_provider,
             service_tier,
             effort,
             summary,
@@ -572,6 +651,10 @@ impl TurnRequestProcessor {
             None
         };
 
+        let (model, model_provider_id) = self
+            .resolve_model_provider_override(model, model_provider)
+            .await?;
+
         let has_any_overrides = has_environment_override
             || runtime_workspace_roots_request.is_some()
             || approval_policy.is_some()
@@ -579,6 +662,7 @@ impl TurnRequestProcessor {
             || sandbox_policy.is_some()
             || permissions.is_some()
             || model.is_some()
+            || model_provider_id.is_some()
             || service_tier.is_some()
             || effort.is_some()
             || summary.is_some()
@@ -655,6 +739,7 @@ impl TurnRequestProcessor {
                     profile_workspace_roots: profile_workspace_roots.clone(),
                     windows_sandbox_level: None,
                     model: model.clone(),
+                    model_provider_id: model_provider_id.clone(),
                     effort: effort.clone(),
                     summary,
                     service_tier: service_tier.clone(),
@@ -678,6 +763,7 @@ impl TurnRequestProcessor {
             active_permission_profile,
             windows_sandbox_level: None,
             model,
+            model_provider_id,
             effort,
             summary,
             service_tier,
@@ -711,6 +797,7 @@ impl TurnRequestProcessor {
                     sandbox_policy: params.sandbox_policy,
                     permissions: params.permissions,
                     model: params.model,
+                    model_provider: params.model_provider,
                     service_tier: params.service_tier,
                     effort: params.effort,
                     summary: params.summary,

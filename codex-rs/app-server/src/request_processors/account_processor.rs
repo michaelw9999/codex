@@ -840,7 +840,10 @@ impl AccountRequestProcessor {
             Ok(account_state) => account_state,
             Err(err) => return Err(invalid_request(err.to_string())),
         };
-        let account = account_state.account.map(Account::from);
+        let account = account_state
+            .account
+            .map(Account::from)
+            .or_else(|| self.auth_manager.auth_cached().and_then(account_from_auth));
 
         Ok(GetAccountResponse {
             account,
@@ -1018,6 +1021,21 @@ impl AccountRequestProcessor {
 
         Ok((primary, rate_limits_by_limit_id))
     }
+}
+
+fn account_from_auth(auth: CodexAuth) -> Option<Account> {
+    if auth.is_api_key_auth() {
+        return Some(Account::ApiKey {});
+    }
+
+    if auth.is_chatgpt_auth() {
+        return Some(Account::Chatgpt {
+            email: auth.get_account_email()?,
+            plan_type: auth.account_plan_type()?,
+        });
+    }
+
+    None
 }
 
 #[cfg(test)]

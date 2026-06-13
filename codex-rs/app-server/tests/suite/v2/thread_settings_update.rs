@@ -95,6 +95,86 @@ async fn thread_settings_update_emits_notification_and_updates_future_turns() ->
 }
 
 #[tokio::test]
+async fn thread_settings_update_switches_model_provider_for_future_turns() -> Result<()> {
+    let initial_server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let local_server = create_mock_responses_server_sequence_unchecked(vec![
+        create_final_assistant_message_sse_response("local done")?,
+    ])
+    .await;
+    let codex_home = TempDir::new()?;
+    let initial_uri = initial_server.uri();
+    let local_uri = local_server.uri();
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        format!(
+            r#"
+model = "mock-model"
+model_provider = "mock_provider"
+approval_policy = "never"
+sandbox_mode = "read-only"
+model_auto_compact_token_limit = 200000
+
+[model_providers.mock_provider]
+name = "Initial provider"
+base_url = "{initial_uri}/v1"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+supports_websockets = false
+
+[model_providers.local_provider]
+name = "Local provider"
+base_url = "{local_uri}/v1"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+supports_websockets = false
+"#
+        ),
+    )?;
+
+    let mut mcp =
+        TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+    let thread = start_thread(&mut mcp).await?.thread;
+
+    send_thread_settings_update(
+        &mut mcp,
+        ThreadSettingsUpdateParams {
+            thread_id: thread.id.clone(),
+            model: Some("local_provider/local-model".to_string()),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    let updated = read_thread_settings_updated(&mut mcp).await?;
+    assert_eq!(updated.thread_id, thread.id);
+    assert_eq!(updated.thread_settings.model, "local-model");
+    assert_eq!(updated.thread_settings.model_provider, "local_provider");
+
+    start_text_turn(&mut mcp, thread.id).await?;
+    timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    assert!(
+        received_response_bodies(&initial_server).await?.is_empty(),
+        "future turn should not use the initial provider"
+    );
+    let local_bodies = received_response_bodies(&local_server).await?;
+    assert!(
+        local_bodies
+            .iter()
+            .any(|body| { body.get("model").and_then(Value::as_str) == Some("local-model") }),
+        "future turn did not use stripped local model id: {local_bodies:#?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_settings_update_while_turn_is_active_emits_notification() -> Result<()> {
     let server = responses::start_mock_server().await;
     let first_response =

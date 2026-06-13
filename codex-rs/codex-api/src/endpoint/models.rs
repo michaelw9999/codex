@@ -11,6 +11,11 @@ use http::Method;
 use http::header::ETAG;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderModel {
+    pub id: String,
+}
+
 pub struct ModelsClient<T: HttpTransport> {
     session: EndpointSession<T>,
 }
@@ -71,6 +76,90 @@ impl<T: HttpTransport> ModelsClient<T> {
 
         Ok((models, header_etag))
     }
+
+    pub async fn list_provider_models(
+        &self,
+        client_version: &str,
+        extra_headers: HeaderMap,
+    ) -> Result<Vec<ProviderModel>, ApiError> {
+        match self
+            .list_provider_models_at_path(Self::path(), client_version, extra_headers.clone())
+            .await
+        {
+            Ok(models) if !models.is_empty() => Ok(models),
+            Ok(_) => self
+                .list_provider_models_at_path("", client_version, extra_headers)
+                .await
+                .or_else(|_| Ok(Vec::new())),
+            Err(primary_err) => self
+                .list_provider_models_at_path("", client_version, extra_headers)
+                .await
+                .or(Err(primary_err)),
+        }
+    }
+
+    async fn list_provider_models_at_path(
+        &self,
+        path: &str,
+        client_version: &str,
+        extra_headers: HeaderMap,
+    ) -> Result<Vec<ProviderModel>, ApiError> {
+        let resp = self
+            .session
+            .execute_with(
+                Method::GET,
+                path,
+                extra_headers,
+                /*body*/ None,
+                |req| {
+                    Self::append_client_version_query(req, client_version);
+                },
+            )
+            .await?;
+
+        parse_provider_models(&resp.body).map_err(|e| {
+            ApiError::Stream(format!(
+                "failed to decode provider models response: {e}; body: {}",
+                String::from_utf8_lossy(&resp.body)
+            ))
+        })
+    }
+}
+
+fn parse_provider_models(body: &[u8]) -> serde_json::Result<Vec<ProviderModel>> {
+    let value = serde_json::from_slice::<serde_json::Value>(body)?;
+    let mut models = Vec::new();
+
+    if let Some(data) = value.get("data").and_then(serde_json::Value::as_array) {
+        for item in data {
+            if let Some(id) = item.get("id").and_then(serde_json::Value::as_str) {
+                push_model_id(&mut models, id);
+            }
+        }
+    }
+
+    if models.is_empty()
+        && let Some(provider_models) = value.get("models").and_then(serde_json::Value::as_array)
+    {
+        for item in provider_models {
+            let id = ["id", "model", "name", "slug"]
+                .into_iter()
+                .find_map(|key| item.get(key).and_then(serde_json::Value::as_str));
+            if let Some(id) = id {
+                push_model_id(&mut models, id);
+            }
+        }
+    }
+
+    Ok(models)
+}
+
+fn push_model_id(models: &mut Vec<ProviderModel>, id: &str) {
+    let id = id.trim();
+    if id.is_empty() || models.iter().any(|model| model.id == id) {
+        return;
+    }
+    models.push(ProviderModel { id: id.to_string() });
 }
 
 #[cfg(test)]
@@ -127,6 +216,48 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct ProviderModelsFallbackTransport {
+        urls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl HttpTransport for ProviderModelsFallbackTransport {
+        async fn execute(&self, req: Request) -> Result<Response, TransportError> {
+            let url = req.url.clone();
+            self.urls.lock().unwrap().push(url.clone());
+
+            if url.contains("/models?") {
+                return Err(TransportError::Http {
+                    status: StatusCode::NOT_FOUND,
+                    url: Some(url),
+                    headers: None,
+                    body: Some("not found".to_string()),
+                });
+            }
+
+            let body = serde_json::to_vec(&json!({
+                "object": "list",
+                "data": [
+                    {
+                        "id": "root-model.gguf",
+                        "object": "model",
+                        "owned_by": "llamacpp"
+                    }
+                ]
+            }))
+            .unwrap();
+            Ok(Response {
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                body: body.into(),
+            })
+        }
+
+        async fn stream(&self, _req: Request) -> Result<StreamResponse, TransportError> {
+            Err(TransportError::Build("stream should not run".to_string()))
+        }
+    }
+
     #[derive(Clone, Default)]
     struct DummyAuth;
 
@@ -149,6 +280,36 @@ mod tests {
             },
             stream_idle_timeout: Duration::from_secs(1),
         }
+    }
+
+    #[tokio::test]
+    async fn provider_model_list_falls_back_to_provider_root() {
+        let urls = Arc::new(Mutex::new(Vec::new()));
+        let transport = ProviderModelsFallbackTransport { urls: urls.clone() };
+        let client = ModelsClient::new(
+            transport,
+            provider("https://example.com/v1"),
+            Arc::new(DummyAuth),
+        );
+
+        let models = client
+            .list_provider_models("0.99.0", HeaderMap::new())
+            .await
+            .expect("root provider model list should succeed");
+
+        assert_eq!(
+            models,
+            vec![ProviderModel {
+                id: "root-model.gguf".to_string(),
+            }]
+        );
+        assert_eq!(
+            *urls.lock().unwrap(),
+            vec![
+                "https://example.com/v1/models?client_version=0.99.0".to_string(),
+                "https://example.com/v1?client_version=0.99.0".to_string()
+            ]
+        );
     }
 
     #[tokio::test]
@@ -265,5 +426,60 @@ mod tests {
 
         assert_eq!(models.len(), 0);
         assert_eq!(etag, Some("\"abc\"".to_string()));
+    }
+
+    #[test]
+    fn parse_provider_models_prefers_openai_compatible_data_ids() {
+        let body = serde_json::to_vec(&json!({
+            "object": "list",
+            "models": [
+                {"name": "fallback-a", "model": "fallback-a"}
+            ],
+            "data": [
+                {"id": "provider-a", "object": "model"},
+                {"id": "provider-b", "object": "model"}
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            parse_provider_models(&body).unwrap(),
+            vec![
+                ProviderModel {
+                    id: "provider-a".to_string()
+                },
+                ProviderModel {
+                    id: "provider-b".to_string()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_provider_models_accepts_models_model_or_name_fields() {
+        let body = serde_json::to_vec(&json!({
+            "models": [
+                {"model": "model-field"},
+                {"name": "name-field"},
+                {"id": "id-field"},
+                {"model": "model-field"}
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            parse_provider_models(&body).unwrap(),
+            vec![
+                ProviderModel {
+                    id: "model-field".to_string()
+                },
+                ProviderModel {
+                    id: "name-field".to_string()
+                },
+                ProviderModel {
+                    id: "id-field".to_string()
+                }
+            ]
+        );
     }
 }

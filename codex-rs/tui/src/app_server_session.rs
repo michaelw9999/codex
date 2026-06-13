@@ -159,10 +159,6 @@ pub(crate) struct AppServerBootstrap {
     pub(crate) auth_mode: Option<TelemetryAuthMode>,
     pub(crate) status_account_display: Option<StatusAccountDisplay>,
     pub(crate) plan_type: Option<codex_protocol::account::PlanType>,
-    /// Whether the configured model provider needs OpenAI-style auth. Combined
-    /// with `has_chatgpt_account` to decide if a startup rate-limit prefetch
-    /// should be fired.
-    pub(crate) requires_openai_auth: bool,
     pub(crate) default_model: String,
     pub(crate) feedback_audience: FeedbackAudience,
     pub(crate) has_chatgpt_account: bool,
@@ -338,7 +334,6 @@ impl AppServerSession {
             auth_mode,
             status_account_display,
             plan_type,
-            requires_openai_auth: account.requires_openai_auth,
             default_model,
             feedback_audience,
             has_chatgpt_account,
@@ -776,6 +771,7 @@ impl AppServerSession {
                     sandbox_policy,
                     permissions,
                     model: Some(model),
+                    model_provider: None,
                     service_tier,
                     effort,
                     summary,

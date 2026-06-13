@@ -76,6 +76,7 @@ use codex_memories_read::memory_root;
 use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
+use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_model_provider_info::built_in_model_providers;
 use codex_model_provider_info::merge_configured_model_providers;
 use codex_models_manager::ModelsManagerConfig;
@@ -1752,6 +1753,61 @@ fn load_model_catalog(
         .transpose()
 }
 
+fn resolve_model_provider_and_model(
+    model: Option<String>,
+    configured_model_provider: Option<String>,
+    model_providers: &HashMap<String, ModelProviderInfo>,
+    model_catalog: Option<&ModelsResponse>,
+) -> std::io::Result<(Option<String>, String)> {
+    if let Some(model) = model.as_deref()
+        && let Some((candidate_provider, candidate_model)) = model.split_once('/')
+        && model_providers.contains_key(candidate_provider)
+    {
+        if candidate_model.trim().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("model id must not be empty for provider `{candidate_provider}`"),
+            ));
+        }
+
+        return Ok((
+            Some(candidate_model.to_string()),
+            candidate_provider.to_string(),
+        ));
+    }
+
+    if model
+        .as_deref()
+        .is_some_and(|model| is_known_openai_catalog_model(model, model_catalog))
+    {
+        return Ok((model, OPENAI_PROVIDER_ID.to_string()));
+    }
+
+    Ok((
+        model,
+        configured_model_provider.unwrap_or_else(|| OPENAI_PROVIDER_ID.to_string()),
+    ))
+}
+
+fn is_known_openai_catalog_model(model: &str, model_catalog: Option<&ModelsResponse>) -> bool {
+    let matches_catalog = |catalog: &ModelsResponse| {
+        catalog
+            .models
+            .iter()
+            .any(|candidate| candidate.slug == model)
+    };
+
+    if let Some(catalog) = model_catalog
+        && matches_catalog(catalog)
+    {
+        return true;
+    }
+
+    codex_models_manager::bundled_models_response()
+        .map(|catalog| matches_catalog(&catalog))
+        .unwrap_or(false)
+}
+
 fn filter_mcp_servers_by_requirements(
     mcp_servers: &mut HashMap<String, McpServerConfig>,
     mcp_requirements: Option<&Sourced<BTreeMap<String, McpServerRequirement>>>,
@@ -3088,13 +3144,18 @@ impl Config {
             .clone()
             .filter(|value| !value.is_empty());
 
-        let model_providers =
-            merge_configured_model_providers(built_in_model_providers(openai_base_url), cfg.model_providers)
-                .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
-
-        let model_provider_id = model_provider
-            .or(cfg.model_provider)
-            .unwrap_or_else(|| "openai".to_string());
+        let model_providers = merge_configured_model_providers(
+            built_in_model_providers(openai_base_url),
+            cfg.model_providers,
+        )
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+        let model_catalog = load_model_catalog(cfg.model_catalog_json.clone())?;
+        let (model, model_provider_id) = resolve_model_provider_and_model(
+            model.or(cfg.model),
+            model_provider.or(cfg.model_provider),
+            &model_providers,
+            model_catalog.as_ref(),
+        )?;
         let model_provider = model_providers
             .get(&model_provider_id)
             .ok_or_else(|| {
@@ -3238,7 +3299,6 @@ impl Config {
 
         let forced_login_method = cfg.forced_login_method;
 
-        let model = model.or(cfg.model);
         let notices = cfg.notice.unwrap_or_default();
         let service_tier = match service_tier_override {
             Some(Some(service_tier)) => Some(service_tier),
@@ -3320,7 +3380,6 @@ impl Config {
         let review_model = override_review_model.or(cfg.review_model);
 
         let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(true);
-        let model_catalog = load_model_catalog(cfg.model_catalog_json.clone())?;
 
         let log_dir = cfg
             .log_dir

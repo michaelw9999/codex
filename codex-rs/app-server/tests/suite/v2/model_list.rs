@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
 use app_test_support::ChatGptAuthFixture;
@@ -25,7 +26,11 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::time::timeout;
+use wiremock::Mock;
 use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
@@ -265,6 +270,196 @@ openai_base_url = "{server_uri}/v1"
         models_mock.requests().len(),
         1,
         "expected a single /models request"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_models_includes_configured_provider_models_from_models_endpoint() -> Result<()> {
+    let provider_server = MockServer::start().await;
+    let _models_mock = Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [
+                {
+                    "name": "fallback-name.gguf",
+                    "model": "fallback-name.gguf",
+                    "type": "model",
+                    "capabilities": ["completion"]
+                }
+            ],
+            "object": "list",
+            "data": [
+                {
+                    "id": "Qwen3.6-35B-A3B-NVFP4-MTP-TURBO.gguf",
+                    "object": "model",
+                    "owned_by": "llamacpp"
+                }
+            ]
+        })))
+        .mount_as_scoped(&provider_server)
+        .await;
+
+    let codex_home = TempDir::new()?;
+    write_models_cache(codex_home.path())?;
+    let provider_uri = provider_server.uri();
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        format!(
+            r#"
+model = "Qwopus"
+model_provider = "llamacpp"
+approval_policy = "never"
+sandbox_mode = "read-only"
+
+[model_providers.llamacpp]
+name = "Local llama.cpp"
+base_url = "{provider_uri}/v1"
+requires_openai_auth = false
+supports_websockets = false
+"#
+        ),
+    )?;
+
+    let mut mcp =
+        TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_list_models_request(ModelListParams {
+            limit: Some(100),
+            cursor: None,
+            include_hidden: None,
+        })
+        .await?;
+
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    let ModelListResponse {
+        data: items,
+        next_cursor,
+    } = to_response::<ModelListResponse>(response)?;
+
+    assert!(next_cursor.is_none());
+    let local_model = items
+        .iter()
+        .find(|model| model.id == "llamacpp/Qwen3.6-35B-A3B-NVFP4-MTP-TURBO.gguf")
+        .context("model/list should include the llama.cpp model from data[].id")?;
+    assert_eq!(
+        local_model.model,
+        "llamacpp/Qwen3.6-35B-A3B-NVFP4-MTP-TURBO.gguf"
+    );
+    assert_eq!(
+        local_model.display_name,
+        "Qwen3.6-35B-A3B-NVFP4-MTP-TURBO.gguf"
+    );
+    let provider_requests = provider_server
+        .received_requests()
+        .await
+        .context("failed to fetch provider requests")?;
+    assert_eq!(
+        provider_requests
+            .iter()
+            .filter(|request| request.url.path() == "/v1/models")
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_models_keeps_provider_models_on_first_page_with_hidden_models() -> Result<()> {
+    let provider_server = MockServer::start().await;
+    let _root_models_mock = Mock::given(method("GET"))
+        .and(path("/v1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [
+                {
+                    "name": "Qwen3.6-35B-A3B-NVFP4-MTP-TURBO.gguf",
+                    "model": "Qwen3.6-35B-A3B-NVFP4-MTP-TURBO.gguf",
+                    "type": "model",
+                    "capabilities": ["completion"]
+                }
+            ],
+            "object": "list",
+            "data": [
+                {
+                    "id": "Qwen3.6-35B-A3B-NVFP4-MTP-TURBO.gguf",
+                    "object": "model",
+                    "owned_by": "llamacpp"
+                }
+            ]
+        })))
+        .mount_as_scoped(&provider_server)
+        .await;
+
+    let codex_home = TempDir::new()?;
+    write_models_cache(codex_home.path())?;
+    let provider_uri = provider_server.uri();
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        format!(
+            r#"
+model = "Qwopus"
+model_provider = "llamacpp"
+approval_policy = "never"
+sandbox_mode = "read-only"
+
+[model_providers.llamacpp]
+name = "Local llama.cpp"
+base_url = "{provider_uri}/v1"
+requires_openai_auth = false
+supports_websockets = false
+"#
+        ),
+    )?;
+
+    let mut mcp =
+        TestAppServer::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_list_models_request(ModelListParams {
+            limit: Some(100),
+            cursor: None,
+            include_hidden: Some(true),
+        })
+        .await?;
+
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    let ModelListResponse { data: items, .. } = to_response::<ModelListResponse>(response)?;
+    let local_model_index = items
+        .iter()
+        .position(|model| model.id == "llamacpp/Qwen3.6-35B-A3B-NVFP4-MTP-TURBO.gguf")
+        .context("provider model should appear in the first page returned to the webview")?;
+    let first_hidden_index = items
+        .iter()
+        .position(|model| model.hidden)
+        .context("fixture should include hidden built-in models")?;
+    assert!(
+        local_model_index < first_hidden_index,
+        "provider models should be returned before hidden built-in models"
+    );
+
+    let provider_requests = provider_server
+        .received_requests()
+        .await
+        .context("failed to fetch provider requests")?;
+    assert_eq!(
+        provider_requests
+            .iter()
+            .filter(|request| request.url.path() == "/v1")
+            .count(),
+        1
     );
     Ok(())
 }
