@@ -1205,10 +1205,11 @@ impl ThreadRequestProcessor {
         let cwd = config_snapshot.cwd().clone();
         let active_permission_profile =
             thread_response_active_permission_profile(config_snapshot.active_permission_profile);
+        let model = app_server_model_id(&config_snapshot.model, &config_snapshot.model_provider_id);
 
         let response = ThreadStartResponse {
             thread: thread.clone(),
-            model: config_snapshot.model,
+            model,
             model_provider: config_snapshot.model_provider_id,
             service_tier: config_snapshot.service_tier,
             cwd,
@@ -2740,9 +2741,14 @@ impl ThreadRequestProcessor {
                     }
                 }
 
+                let model = app_server_model_id(
+                    &session_configured.model,
+                    &session_configured.model_provider_id,
+                );
+
                 let response = ThreadResumeResponse {
                     thread,
-                    model: session_configured.model,
+                    model,
                     model_provider: session_configured.model_provider_id,
                     service_tier: session_configured.service_tier,
                     cwd: session_configured.cwd,
@@ -3454,10 +3460,14 @@ impl ThreadRequestProcessor {
         );
         let active_permission_profile =
             thread_response_active_permission_profile(config_snapshot.active_permission_profile);
+        let model = app_server_model_id(
+            &session_configured.model,
+            &session_configured.model_provider_id,
+        );
 
         let response = ThreadForkResponse {
             thread: thread.clone(),
-            model: session_configured.model,
+            model,
             model_provider: session_configured.model_provider_id,
             service_tier: session_configured.service_tier,
             cwd: session_configured.cwd,

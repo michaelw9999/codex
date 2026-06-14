@@ -635,6 +635,34 @@ fn add_mcp_resource_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
     }
 }
 
+fn should_add_apply_patch_handler(turn_context: &TurnContext) -> bool {
+    turn_context.model_info.apply_patch_tool_type.is_some()
+        || turn_context.features.enabled(Feature::ApplyPatchFreeform)
+        || turn_context
+            .provider
+            .info()
+            .base_url
+            .as_deref()
+            .is_some_and(is_loopback_base_url)
+}
+
+fn is_loopback_base_url(base_url: &str) -> bool {
+    let Some(rest) = base_url.trim().split_once("://").map(|(_, rest)| rest) else {
+        return false;
+    };
+    let Some(authority) = rest.split('/').next() else {
+        return false;
+    };
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(bracketed_host) = authority.strip_prefix('[') {
+        bracketed_host.split(']').next().unwrap_or(bracketed_host)
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    };
+
+    host.eq_ignore_ascii_case("localhost") || host == "::1" || host.starts_with("127.")
+}
+
 fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
     let turn_context = context.turn_context;
     let features = turn_context.features.get();
@@ -672,8 +700,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
         ));
     }
 
-    if environment_mode.has_environment() && turn_context.model_info.apply_patch_tool_type.is_some()
-    {
+    if environment_mode.has_environment() && should_add_apply_patch_handler(turn_context) {
         let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
         planned_tools.add(ApplyPatchHandler::new(include_environment_id));
     }

@@ -67,8 +67,8 @@ fn image_detail_original_is_removed_and_disabled_by_default() {
 }
 
 #[test]
-fn apply_patch_freeform_is_removed_and_disabled_by_default() {
-    assert_eq!(Feature::ApplyPatchFreeform.stage(), Stage::Removed);
+fn apply_patch_freeform_is_under_development_and_disabled_by_default() {
+    assert_eq!(Feature::ApplyPatchFreeform.stage(), Stage::UnderDevelopment);
     assert_eq!(Feature::ApplyPatchFreeform.default_enabled(), false);
     assert_eq!(
         feature_for_key("apply_patch_freeform"),
@@ -496,7 +496,7 @@ fn from_sources_ignores_removed_js_repl_feature_keys() {
 }
 
 #[test]
-fn from_sources_ignores_removed_apply_patch_freeform_feature_key() {
+fn from_sources_honors_apply_patch_freeform_feature_key() {
     let features_toml =
         FeaturesToml::from(BTreeMap::from([("apply_patch_freeform".to_string(), true)]));
 
@@ -509,7 +509,7 @@ fn from_sources_ignores_removed_apply_patch_freeform_feature_key() {
         FeatureOverrides::default(),
     );
 
-    assert_eq!(features, Features::with_defaults());
+    assert_eq!(features.enabled(Feature::ApplyPatchFreeform), true);
 }
 
 #[test]
@@ -606,7 +606,7 @@ usage_hint_enabled = false
         FeatureOverrides::default(),
     );
 
-    assert_eq!(features.enabled(Feature::MultiAgentV2), false);
+    assert_eq!(features.enabled(Feature::MultiAgentV2), true);
     assert_eq!(features_toml.entries(), BTreeMap::new());
     assert_eq!(
         features_toml.multi_agent_v2,
@@ -739,7 +739,7 @@ code_mode = true
         panic!("expected warning event");
     };
     assert_eq!(
-        "Under-development features enabled: code_mode, multi_agent_v2. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /tmp/config.toml.".to_string(),
+        "Under-development features enabled: code_mode. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /tmp/config.toml.".to_string(),
         message
     );
 }

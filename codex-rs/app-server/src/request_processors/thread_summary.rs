@@ -200,7 +200,7 @@ pub(crate) fn thread_settings_from_config_snapshot(
         active_permission_profile: thread_response_active_permission_profile(
             config_snapshot.active_permission_profile.clone(),
         ),
-        model: config_snapshot.model.clone(),
+        model: app_server_model_id(&config_snapshot.model, &config_snapshot.model_provider_id),
         model_provider: config_snapshot.model_provider_id.clone(),
         service_tier: config_snapshot.service_tier.clone(),
         effort: config_snapshot.reasoning_effort.clone(),
@@ -228,6 +228,7 @@ pub(crate) fn thread_settings_from_core_snapshot(
         collaboration_mode,
     } = snapshot;
     let sandbox_policy = thread_response_sandbox_policy(&permission_profile, cwd.as_path());
+    let model = app_server_model_id(&model, &model_provider_id);
     ThreadSettings {
         sandbox_policy,
         cwd,

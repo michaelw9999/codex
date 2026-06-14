@@ -468,6 +468,14 @@ use uuid::Uuid;
 #[cfg(test)]
 use codex_app_server_protocol::ServerRequest;
 
+pub(super) fn app_server_model_id(model: &str, model_provider_id: &str) -> String {
+    if model_provider_id == OPENAI_PROVIDER_ID || model.contains('/') {
+        model.to_string()
+    } else {
+        format!("{model_provider_id}/{model}")
+    }
+}
+
 mod account_processor;
 mod apps_processor;
 mod catalog_processor;

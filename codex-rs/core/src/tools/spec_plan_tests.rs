@@ -274,6 +274,15 @@ fn use_chatgpt_auth(turn: &mut TurnContext) {
     );
 }
 
+fn use_openai_compatible_provider(turn: &mut TurnContext, base_url: &str) {
+    let mut provider_info = ModelProviderInfo::create_openai_provider(Some(base_url.to_string()));
+    provider_info.requires_openai_auth = false;
+    update_config(turn, |config| {
+        config.model_provider = provider_info.clone();
+    });
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
 fn use_bedrock_provider(turn: &mut TurnContext) {
     let provider_info = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
     update_config(turn, |config| {
@@ -640,6 +649,59 @@ async fn environment_count_controls_environment_backed_tools() {
         multiple_environments.visible_spec("view_image"),
         "environment_id"
     ));
+}
+
+#[tokio::test]
+async fn local_fallback_model_metadata_enables_apply_patch() {
+    let plan = probe(|turn| {
+        turn.model_info.apply_patch_tool_type = None;
+        turn.model_info.used_fallback_model_metadata = true;
+        use_openai_compatible_provider(turn, "http://127.0.0.1:8080/v1");
+    })
+    .await;
+
+    plan.assert_visible_contains(&["apply_patch"]);
+    plan.assert_registered_contains(&["apply_patch"]);
+}
+
+#[tokio::test]
+async fn local_provider_enables_apply_patch_without_fallback_metadata() {
+    let plan = probe(|turn| {
+        turn.model_info.apply_patch_tool_type = None;
+        turn.model_info.used_fallback_model_metadata = false;
+        use_openai_compatible_provider(turn, "http://127.0.0.1:8080/v1");
+    })
+    .await;
+
+    plan.assert_visible_contains(&["apply_patch"]);
+    plan.assert_registered_contains(&["apply_patch"]);
+}
+
+#[tokio::test]
+async fn remote_provider_without_apply_patch_metadata_does_not_enable_apply_patch() {
+    let plan = probe(|turn| {
+        turn.model_info.apply_patch_tool_type = None;
+        turn.model_info.used_fallback_model_metadata = true;
+        use_openai_compatible_provider(turn, "https://example.com/v1");
+    })
+    .await;
+
+    plan.assert_visible_lacks(&["apply_patch"]);
+    plan.assert_registered_lacks(&["apply_patch"]);
+}
+
+#[tokio::test]
+async fn apply_patch_freeform_feature_enables_apply_patch_for_remote_provider() {
+    let plan = probe(|turn| {
+        turn.model_info.apply_patch_tool_type = None;
+        turn.model_info.used_fallback_model_metadata = false;
+        set_feature(turn, Feature::ApplyPatchFreeform, /*enabled*/ true);
+        use_openai_compatible_provider(turn, "https://example.com/v1");
+    })
+    .await;
+
+    plan.assert_visible_contains(&["apply_patch"]);
+    plan.assert_registered_contains(&["apply_patch"]);
 }
 
 #[tokio::test]

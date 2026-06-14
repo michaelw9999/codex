@@ -647,6 +647,7 @@ pub(super) async fn handle_pending_thread_resume_request(
         thread_response_active_permission_profile(active_permission_profile);
     let session_id = conversation.session_configured().session_id.to_string();
     thread.session_id = session_id;
+    let model = app_server_model_id(&model, &model_provider_id);
 
     let response = ThreadResumeResponse {
         thread,

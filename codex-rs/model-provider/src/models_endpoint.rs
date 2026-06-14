@@ -18,6 +18,7 @@ use codex_login::default_client::build_reqwest_client;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::manager::ModelsEndpointClient;
 use codex_models_manager::manager::ModelsEndpointFuture;
+use codex_models_manager::model_info::model_info_from_slug;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CoreResult;
@@ -85,13 +86,30 @@ impl OpenAiModelsEndpoint {
         let client = ModelsClient::new(transport, api_provider, api_auth)
             .with_telemetry(Some(request_telemetry));
 
-        timeout(
+        let result = timeout(
             MODELS_REFRESH_TIMEOUT,
             client.list_models(client_version, HeaderMap::new()),
         )
         .await
         .map_err(|_| CodexErr::Timeout)?
-        .map_err(map_api_error)
+        .map_err(map_api_error);
+
+        match result {
+            Ok(models) => Ok(models),
+            Err(err)
+                if !self.provider_info.requires_openai_auth
+                    && is_models_metadata_decode_error(&err) =>
+            {
+                let models = self
+                    .list_provider_models(client_version)
+                    .await?
+                    .into_iter()
+                    .map(|model| model_info_from_slug(&model.id))
+                    .collect();
+                Ok((models, /*etag*/ None))
+            }
+            Err(err) => Err(err),
+        }
     }
 
     async fn list_provider_models(&self, client_version: &str) -> CoreResult<Vec<ProviderModel>> {
@@ -128,6 +146,14 @@ impl OpenAiModelsEndpoint {
             .is_some_and(|auth_manager| auth_manager.codex_api_key_env_enabled());
         collect_auth_env_telemetry(&self.provider_info, codex_api_key_env_enabled)
     }
+}
+
+fn is_models_metadata_decode_error(err: &CodexErr) -> bool {
+    matches!(
+        err,
+        CodexErr::Stream(message, None)
+            if message.contains("failed to decode models response")
+    )
 }
 
 pub async fn list_provider_models(
@@ -255,6 +281,12 @@ mod tests {
 
     use super::*;
     use codex_protocol::config_types::ModelProviderAuthInfo;
+    use pretty_assertions::assert_eq;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
 
     fn provider_info_with_command_auth() -> ModelProviderInfo {
         ModelProviderInfo {
@@ -291,5 +323,43 @@ mod tests {
         );
 
         assert!(!endpoint.has_command_auth());
+    }
+
+    #[tokio::test]
+    async fn non_openai_auth_provider_models_response_falls_back_to_model_ids() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [{
+                    "name": "Qwen3.6-35B-A3B-NVFP4-MTP-HQ.gguf",
+                    "model": "Qwen3.6-35B-A3B-NVFP4-MTP-HQ.gguf",
+                    "capabilities": ["completion"]
+                }],
+                "object": "list",
+                "data": [{
+                    "id": "Qwen3.6-35B-A3B-NVFP4-MTP-HQ.gguf",
+                    "object": "model",
+                    "owned_by": "llamacpp"
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let provider_info = ModelProviderInfo {
+            requires_openai_auth: false,
+            ..ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())))
+        };
+        let endpoint = OpenAiModelsEndpoint::new(provider_info, /*auth_manager*/ None);
+
+        let (models, etag) = endpoint
+            .list_models("0.1.0")
+            .await
+            .expect("provider models response should become fallback metadata");
+
+        assert_eq!(etag, None);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].slug, "Qwen3.6-35B-A3B-NVFP4-MTP-HQ.gguf");
+        assert!(models[0].used_fallback_model_metadata);
     }
 }
